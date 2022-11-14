@@ -61,7 +61,7 @@ class BusinessType(models.Model):
 class PartnerInherit(models.Model):
     _name = 'res.partner'
     _inherit = ['res.partner', 'gst.verification', 'business.type']
-
+    sap_state_code = fields.Char(string="SAP State Code")
     business_type = fields.Many2one(comodel_name='business.type', string='Business Type')
 
     @api.model
@@ -132,7 +132,6 @@ class PartnerInherit(models.Model):
     gstn = fields.Char(string="GSTN")
     sap_ref = fields.Char()
 
-
     def return_account_manager_domain(self):
         acc_m_team_id = self.env['crm.team'].search([('name', '=', 'ACCOUNT MANAGER')]).id
         domain = self.env['crm.team.member'].search([('crm_team_id', '=', acc_m_team_id)]).user_id.ids
@@ -156,10 +155,13 @@ class PartnerInherit(models.Model):
         domain = self.env['crm.team.member'].search([('crm_team_id', '=', bde_team_id)]).user_id.ids
         return [('id', 'in', domain)]
 
-    account_manager = fields.Many2one(comodel_name='res.users', string='Account Manager', domain=lambda self: self.return_account_manager_domain(), store=True)
-    account_receivable = fields.Many2one(comodel_name='res.users', string='Account Receivable', domain=lambda self: self.return_account_receivable_domain(), readonly=True, store=True)
-    bde = fields.Many2one(comodel_name='res.users', string='BDE', domain=lambda self: self.return_bde_domain(), store=True)
-
+    account_manager = fields.Many2one(comodel_name='res.users', string='Account Manager',
+                                      domain=lambda self: self.return_account_manager_domain(), store=True)
+    account_receivable = fields.Many2one(comodel_name='res.users', string='Account Receivable',
+                                         domain=lambda self: self.return_account_receivable_domain(), readonly=True,
+                                         store=True)
+    bde = fields.Many2one(comodel_name='res.users', string='BDE', domain=lambda self: self.return_bde_domain(),
+                          store=True)
 
     credit_rating = fields.Selection([
         ('0', 'A'),
@@ -371,6 +373,44 @@ class PartnerInherit(models.Model):
         raise Exception("Vat is not valid")
 
     @api.model_create_multi
+    def model_build(self, vals):
+        request_content = {}
+        bill_to_address = {}
+        ship_to_address = {}
+        self.env.cr.execute("""SELECT max(sap_ref) FROM res_partner""")
+        max_sap = self.env.cr.fetchall()
+        card_code = 43
+        for val in vals:
+
+            state_id=super(PartnerInherit, self).build_customer_request(val['vat'][0:2])
+            request_content = dict(CardCode=card_code, CardName=val['name'],
+                                   Address=val['street'] + " " + val['street2'], ZipCode=val['zip'],
+                                   MailAddress=val['email'], MailZipCode=val['zip'], Cellular=val['phone'],
+                                   City=val['city'], MailCity=val['city'], EmailAddress=val['email'],
+                                   BPFiscalTaxIDCollection={
+                                       dict(TaxId0=val['vat'][2:10], BPCode=card_code)
+                                   })
+            bill_to_address = dict(AddressName=state_id[1], ZipCode=val['zip'],
+                                   City=val['city'] + " " + val['street2'], State=state_id[0],
+                                   BuildingFloorRoom=val['street'] + " " + val['street2'], AddressType="bo_ShipTo",
+                                   BPCode=card_code, GSTIN=val['vat'], GstType="gstRegularTDSISD")
+
+            ship_to_address = {'AddressName': state_id[1], 'ZipCode': val['zip'],
+                               'City': val['city'] + " " + val['street2'], 'State': state_id[0],
+                               'BuildingFloorRoom': val['street'] + " " + val['street2'],
+                               'AddressType': "bo_ShipTo", 'BPCode': card_code, 'GSTIN': val['vat'],
+                               'GstType': "gstRegularTDSISD"}
+
+        request_content['BPAddresses'] = [bill_to_address,ship_to_address]
+
+        request_content['ShipToDefault'] = ship_to_address['AddressName'];
+        request_content['BilltoDefault'] = bill_to_address['AddressName']
+
+        sap_customer = super(PartnerInherit, self).create_customer(request_content)
+
+        return sap_customer
+
+    @api.model_create_multi
     def create(self, vals):
         _logger.info("evt=CreatePartner msg=Inside create method before super")
 
@@ -381,15 +421,20 @@ class PartnerInherit(models.Model):
                 return saved_partner_id
 
             gstn = self._get_gstn(val)
+            sap_state_code = gstn[0:2]
             val['vat'] = gstn[slice(2, 12, 1)] if gstn is not False else val['vat']
 
+
+
             if 'branch_ids' in val and len(val['branch_ids']) == 0 and val['is_customer_branch'] == False:
-                val['account_receivable'] = self.getARId()
+                # val['account_receivable'] = self.getARId()
                 saved_partner_id = super(PartnerInherit, self).create([val])
                 _logger.info("evt=CreatePartner msg=Creating a default branch for new customer")
                 self.env['res.partner'].create(self._get_partner_details(saved_partner_id, gstn))
                 return saved_partner_id
             else:
+
+                #val[] = sap_customer.
                 saved_partner_id = super(PartnerInherit, self).create([val])
                 if saved_partner_id.is_customer_branch == True:
                     self._add_invoice_addresses(saved_partner_id)
